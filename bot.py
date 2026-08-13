@@ -1,9 +1,9 @@
 import logging
 import io
 import json
-import sqlite3
 import os
 import asyncio
+import threading
 import base64
 import httpx
 import calendar
@@ -15,6 +15,9 @@ from PIL import Image
 from telegram import Update
 from telegram.ext import ApplicationBuilder, ContextTypes, CommandHandler, MessageHandler, filters
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
+from http.server import HTTPServer, BaseHTTPRequestHandler
+
+from db import get_conn
 
 # ---------------------------------------------------------------------------
 # CONFIGURACIÓN Y VARIABLES DE ENTORNO
@@ -58,7 +61,7 @@ def formatear_fecha(dt: datetime) -> str:
 # BASE DE DATOS (SQLite)
 # ---------------------------------------------------------------------------
 def init_db():
-    conn = sqlite3.connect("citas.db")
+    conn = get_conn()
     cursor = conn.cursor()
     cursor.execute("""
         CREATE TABLE IF NOT EXISTS citas (
@@ -74,7 +77,7 @@ def init_db():
 
 def guardar_cita(chat_id, servicio, fecha_hora, colaborador):
     """Guarda una cita. Devuelve True si se insertó, False si ya existía (duplicada)."""
-    conn = sqlite3.connect("citas.db")
+    conn = get_conn()
     cursor = conn.cursor()
     cursor.execute(
         "SELECT id FROM citas WHERE chat_id = ? AND servicio = ? AND fecha_hora = ?",
@@ -177,7 +180,7 @@ def programar_recordatorios(app, chat_id, citas_json):
 
 def reanalizar_y_cargar_citas_pendientes(app):
     """Recarga las citas de SQLite al Scheduler en caso de reinicio del bot"""
-    conn = sqlite3.connect("citas.db")
+    conn = get_conn()
     cursor = conn.cursor()
     cursor.execute("SELECT chat_id, servicio, fecha_hora, colaborador FROM citas")
     filas = cursor.fetchall()
@@ -232,7 +235,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 def consultar_citas(chat_id, desde=None, hasta=None):
     """Consulta citas de un chat, opcionalmente en un rango de fechas."""
-    conn = sqlite3.connect("citas.db")
+    conn = get_conn()
     cursor = conn.cursor()
     query = "SELECT servicio, fecha_hora, colaborador FROM citas WHERE chat_id = ?"
     params = [chat_id]
@@ -414,9 +417,30 @@ async def procesar_imagen(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("❌ Ocurrió un error al procesar las citas. Asegúrate de enviar una captura clara.")
 
 # ---------------------------------------------------------------------------
+# MINI HTTP SERVER (health check para plataformas tipo Koyeb)
+# ---------------------------------------------------------------------------
+class HealthHandler(BaseHTTPRequestHandler):
+    def do_GET(self):
+        self.send_response(200)
+        self.end_headers()
+        self.wfile.write(b"ok")
+
+    def log_message(self, format, *args):
+        pass
+
+def iniciar_health_server():
+    """Levanta un servidor HTTP mínimo en $PORT para que el health check del host funcione."""
+    puerto = int(os.getenv("PORT", "8000"))
+    servidor = HTTPServer(("0.0.0.0", puerto), HealthHandler)
+    hilo = threading.Thread(target=servidor.serve_forever, daemon=True)
+    hilo.start()
+    logging.info(f"🩺 Health check HTTP escuchando en el puerto {puerto}")
+
+# ---------------------------------------------------------------------------
 # INICIALIZACIÓN
 # ---------------------------------------------------------------------------
 if __name__ == '__main__':
+    iniciar_health_server()
     init_db()
     
     app = (
